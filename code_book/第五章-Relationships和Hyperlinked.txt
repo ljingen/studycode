@@ -1,0 +1,111 @@
+目前我们使用主键来表示模型之间的关系。在本章，我们将使用超链接关系来提高API的内聚性以及可读性。
+为API创建一个根URL
+
+现在我们'snippets'和'users'创建了相应的URL，但我们的API没有一个统一的入口。我们使用早些介绍的普通函数视图和@api_view装饰器来创建一个，编辑snippets/views.py添加下面代码：
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from rest_framework.reverse import reverse
+
+
+@api_view(['GET'])
+def api_root(request, format=None):
+    return Response({
+        'users': reverse('user-list', request=request, format=format),
+        'snippets': reverse('snippet-list', request=request, format=format)
+    })
+这里有两件事需要注意：首先我们使用的是REST框架提供的reverse函数来返回完全限定的URL;第二，URL通过稍后定义在snippets/urls.py中的名字来被识别。
+为语法高亮功能创建URL
+
+很明显的一件事就是我们还没为语法高亮功能创建URL。
+与其它的API不同，这个接口我们想使用HTML来表示而不是JSON。REST框架提供了2种呈现HTML的方法，一种是使用模板渲染，另一种则是使用已经构建好的HTML代码。这里我们使用第二种方式。
+另一个需要考虑的就是不存在通用类视图来供我们创建语法高亮视图使用，所以这里不返回一个对象实例，而是返回对象实例的属性。
+这里我们使用最基础的类视图的get()方法而非通用类视图，在snippets/views.py中添加如下代码：
+from rest_framework import renderers
+from rest_framework.response import Response
+
+class SnippetHighlight(generics.GenericAPIView):
+    queryset = Snippet.objects.all()
+    renderer_classes = (renderers.StaticHTMLRenderer,)
+
+    def get(self, request, *args, **kwargs):
+        snippet = self.get_object()
+        return Response(snippet.highlighted)
+就像往常一样，我们还需要为新的视图来创建URL配置。修改snippets/urls.py，添加：
+url(r'^$', views.api_root),
+url(r'^snippets/(?P<pk>[0-9]+)/highlight/$', views.SnippetHighlight.as_view()),
+使用超链接
+
+在Web API中处理实体之间的关系是一件非常头疼的事情。下面有几种不同的方法来表示关系：
+使用主键
+使用超链接
+在相关实体间使用唯一的slug字段表示
+在相关实体间使用默认的字符串表示
+将相关的子实体嵌套到上级关系中
+其他自定义方法
+REST framework支持上述所有方法，并且可以应用于正向关系、反向关系或类似通用外键这类自定义管理项中。
+在这里我们在实体间使用超链接来进行关联，为了达到这个目的我们需要修改serializers，使用HyperlinkedModelSerializer来替代原先的ModelSerializer：
+HyperlinkedModelSerializer默认不包含主键
+HyperlinkedModelSerializer自动包含URL字段HyperlinkedIdentityField
+使用HyperlinkedRelatedField来替代PrimaryKeyRelatedField表示关系
+我们可以很容易的改写代码，编辑snippets/serializers.py：
+ class SnippetSerializer(serializers.HyperlinkedModelSerializer):
+    owner = serializers.ReadOnlyField(source='owner.username')
+    highlight = serializers.HyperlinkedIdentityField(view_name='snippet-highlight', format='html')
+
+    class Meta:
+        model = Snippet
+        fields = ('url', 'highlight', 'owner',
+                  'title', 'code', 'linenos', 'language', 'style')
+
+
+class UserSerializer(serializers.HyperlinkedModelSerializer):
+    snippets = serializers.HyperlinkedRelatedField(many=True, view_name='snippet-detail', read_only=True)
+
+    class Meta:
+        model = User
+        fields = ('url', 'username', 'snippets')
+这里新增了一个highlight字段，这个字段和url字段类型相同，区别就是它指向snippet-highlight而非snippet-detail。
+由于我们有.json格式的后缀，所以我们也要指明highlight字段使用.html来返回相应的格式。
+为URL命名
+
+如果我们创建了一个基于超链接的API，我们需要确保每个URL都被命名了。让我们看看那些需要被命名的URL：
+根URL包含'user-list'和'snippet-list'
+snippet serializer包含指向'snippet-highlight'的字段
+user serializer包含指向'snippet-detail'的字段
+snippet serializers和user serializers 包含'url'字段，这个字段默认指向'{model_name}-detail',这里分别是'snippet-detail'和'user-detail'
+最终，我们的snippets/urls.py如下：
+from django.conf.urls import url, include
+from rest_framework.urlpatterns import format_suffix_patterns
+from snippets import views
+
+# API endpoints
+urlpatterns = format_suffix_patterns([
+    url(r'^$', views.api_root),
+    url(r'^snippets/$',
+        views.SnippetList.as_view(),
+        name='snippet-list'),
+    url(r'^snippets/(?P<pk>[0-9]+)/$',
+        views.SnippetDetail.as_view(),
+        name='snippet-detail'),
+    url(r'^snippets/(?P<pk>[0-9]+)/highlight/$',
+        views.SnippetHighlight.as_view(),
+        name='snippet-highlight'),
+    url(r'^users/$',
+        views.UserList.as_view(),
+        name='user-list'),
+    url(r'^users/(?P<pk>[0-9]+)/$',
+        views.UserDetail.as_view(),
+        name='user-detail')
+])
+分页
+
+列表视图可能为用户返回很多代码片段，所以我们需要对结果进行分页，并且可以遍历每个单独的页面。
+我们可以使用分页来修改默认的列表样式，修改tutorial/settings.py添加：
+REST_FRAMEWORK = {
+    'PAGE_SIZE': 10
+}
+注意，所有关于REST框架的设定都在一个叫做'REST_FRAMEWORK'的字典中，这帮助我们将设定信息和其他的库分离开来。
+如果需要的话我们也可以自定义分页样式，但这里我们先使用默认选项。
+测试
+
+打开浏览器，就会发现你可以使用超链接来简单的浏览API了。你也会在snippet中看到'highlight'链接,这将返回高亮的HTML格式代码。

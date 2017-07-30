@@ -1,0 +1,149 @@
+第四章-认证和权限
+
+现在我们的API没有任何限制谁可以编辑删除代码片段，我们需要一些更好的功能来满足下列要求：
+1、代码片段需要 和 创建者进行关联
+只有认证用户可以创建新的代码片段
+只有创建者才能修改或删除代码片段
+未认证用户只有只读权限
+向模型中新增字段
+
+Snippet模型需要作出一些改变。首先添加2个字段，一个字段用于表明谁创建了这个代码片段，另一个用来存储高亮的HTML代码。
+编辑models.py中关于Snippet的模型，新增下列代码：
+owner = models.ForeignKey('auth.User', related_name='snippets')
+highlighted = models.TextField()
+也要确保当实例被保存时，使用pygments库来正确处理highlighted字段。
+所以需要引入一些额外的包：
+from pygments.lexers import get_lexer_by_name
+from pygments.formatters.html import HtmlFormatter
+from pygments import highlight
+接下来，添加.save()到模型中：
+def save(self, *args, **kwargs):
+    """
+    使用pygments来创建高亮的HTML代码。
+    """
+    lexer = get_lexer_by_name(self.language)
+    linenos = self.linenos and 'table' or False
+    options = self.title and {'title': self.title} or {}
+    formatter = HtmlFormatter(style=self.style, linenos=linenos,
+                              full=True, **options)
+    self.highlighted = highlight(self.code, lexer, formatter)
+    super(Snippet, self).save(*args, **kwargs)
+完成上面的步骤后，我们需要更新数据库表。正常情况下我们需要创建一个数据库迁移任务来实现这个目标，但在教程中，我们删除整个数据库重新建表：
+rm -f tmp.db db.sqlite3
+rm -r snippets/migrations
+python manage.py makemigrations snippets
+python manage.py migrate
+你也许还需要创建几个用户来测试API，最方便的办法还是使用python manage.py createsuperuser命令。
+为用户模型添加接口
+
+现在我们有一些用户了，我们最好在API中添加些用户相关的接口。修改serializers.py并添加下列代码：
+from django.contrib.auth.models import User
+
+class UserSerializer(serializers.ModelSerializer):
+    snippets = serializers.PrimaryKeyRelatedField(many=True, queryset=Snippet.objects.all())
+
+    class Meta:
+        model = User
+        fields = ('id', 'username', 'snippets')
+因为snippets和用户是一种反向关联，默认情况下不会包含在ModelSerializer类中，所以我们需要手动添加。
+我们也需要对views.py进行修改，另外用户页面是只读的，所以使用ListAPIView以及 RetrieveAPIView这2个通用类视图：
+from django.contrib.auth.models import User
+
+
+class UserList(generics.ListAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+
+
+class UserDetail(generics.RetrieveAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+`
+确保引入了UserSerializer类：
+from snippets.serializers import UserSerializer
+最后还需要对其进行URL的配置，修改urls.py，添加下列代码：
+url(r'^users/$', views.UserList.as_view()),
+url(r'^users/(?P<pk>[0-9]+)/$', views.UserDetail.as_view()),
+关联user和snippet
+
+现在如果我们创建一个代码片段，是没法和用户进行关联的。因为用户信息是通过request获取而不是以serialized数据传递的。
+为了解决这个问题。我们需要重写snippet视图中.perform_create()方法，这个方法准许我们修改实例如何被保存、处理任何由request或requested URL传递进来的隐含数据。
+修改SnippetList，新增下列代码：
+def perform_create(self, serializer):
+    serializer.save(owner=self.request.user)
+现在create()方法将获得一个新的字段'owner',值就是request中的用户信息。
+更新serializer
+
+现在代码片段和创建者之间建立了联系，现在需要修改SnippetSerializer来反映这一变化。修改serializers.py添加下列代码：
+owner = serializers.ReadOnlyField(source='owner.username')
+注意：确保你也添加了'owner'到内部类Meta中的fields字段里。
+这个字段做了些很有趣的事情。source决定了显示user的哪个参数值，并且可以使用user的任何属性。
+这里我们还使用了ReadOnlyField类型，不同于其他字段类型，比如CharField, BooleanField等。这种类型是只读的，用于进行序列化时候的展示，并且反序列化时不会被修改。这里我们也可以使用CharField(read_only=True)来替代它。
+添加权限认证
+
+现在我们将代码片段和用户进行了关联，但我们需要确保只有认证用户才能创建、修改、删除代码片段。
+REST framework包含了多种认证类，这里我们使用IsAuthenticatedOrReadOnly，这个类确保了只有认证用户才有读写权限，未认证用户则只有只读权限。
+修改views.py,添加：
+from rest_framework import permissions
+然后修改SnippetList和SnippetDetail类，添加：
+permission_classes = (permissions.IsAuthenticatedOrReadOnly,)
+添加登录功能
+
+如果你现在打开浏览器，你会发现你无法创建新的代码片段了，所以我们需要启用用户登录功能。编辑tutorial/urls.py新增代码:
+from django.conf.urls import include
+在最后，添加：
+urlpatterns += [
+    url(r'^api-auth/', include('rest_framework.urls',
+                               namespace='rest_framework')),
+]
+你可以将'api-auth'替换成任何你喜欢的字符串，唯一的限制就是namespace必须为'rest_framework'。在Django1.9+的版本中，REST framework将自动设置，所以无需理会。
+现在再次刷新页面将在右上角看到'Login'按钮，登录后就可以创建新代码片段了。
+当你创建了几个代码片段后，访问/users/页面，就会看到每个用户对应的代码片段的主键列表了。
+对象级别的权限
+
+现在所有人都可以浏览代码片段了，接下来实现只有创建者才能删除或修改自己的代码片段功能。想实现这点，我们需要自定义权限认证方法。
+新建文件permissions.py：
+from rest_framework import permissions
+
+
+class IsOwnerOrReadOnly(permissions.BasePermission):
+    """
+    自定义权限，只有创建者才能编辑
+    """
+
+    def has_object_permission(self, request, view, obj):
+        # Read permissions are allowed to any request,
+        # so we'll always allow GET, HEAD or OPTIONS requests.
+        if request.method in permissions.SAFE_METHODS:
+            return True
+
+        # Write permissions are only allowed to the owner of the snippet.
+        return obj.owner == request.user
+接下来修改SnippetDetail视图：
+permission_classes = (permissions.IsAuthenticatedOrReadOnly,
+                      IsOwnerOrReadOnly,)
+并确保引入了所需的类：
+from snippets.permissions import IsOwnerOrReadOnly
+再次打开浏览器，如果你是这个代码片段的创建者的话，你会看到'DELETE'和'PUT'操作按钮。
+为API调用添加认证信息
+
+因为我们添加了权限认证，所以我们想编辑任何代码片段时都需要提供认证信息。我们并没有设置任何认证相关的类，目前默认的认证方法是SessionAuthentication和BasicAuthentication。
+当我们使用浏览器访问时，我们可以登录，浏览器会自动处理session信息用于认证。当我们使用编程方式调用API时，我们需要显式的为每个请求提供认证信息。
+如果我们尝试创建一个代码片段而未提供认证消息的话，我们会得到一个错误返回：
+http POST http://127.0.0.1:8000/snippets/ code="print 123"
+
+{
+    "detail": "Authentication credentials were not provided."
+}
+而提供用户名和密码就可以创建了：
+http -a tom:password123 POST http://127.0.0.1:8000/snippets/ code="print 789"
+
+{
+    "id": 5,
+    "owner": "tom",
+    "title": "foo",
+    "code": "print 789",
+    "linenos": false,
+    "language": "python",
+    "style": "friendly"
+}
